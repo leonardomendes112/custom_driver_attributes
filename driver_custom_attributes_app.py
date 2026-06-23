@@ -678,7 +678,7 @@ def render_clean_mode(
         "attributes, so clean mode should target only optional attributes."
     )
     st.warning(
-        "After preview, select only the optional attributes to clean. Unselected attributes are skipped automatically."
+        "Fetch the attributes first, then select only the optional attribute IDs to clean. Unselected attributes are skipped automatically."
     )
     try:
         filters = render_filter_controls("clean", show_attribute_filter=False)
@@ -687,18 +687,17 @@ def render_clean_mode(
         return
 
     dry_run = st.checkbox("Dry run only", value=True, key="clean_dry_run")
-    allow_unfiltered = st.checkbox("Allow unfiltered clean", key="clean_allow_unfiltered")
     confirm_clean = st.checkbox(
         "I understand this will clean matching optional attributes",
         key="clean_confirmation_checkbox",
         help="Required before Run Clean is enabled. Keep Dry run only checked until the preview looks correct.",
     )
     has_driver_filter = bool(filters["driver_ids"])
-    if not has_driver_filter and not allow_unfiltered:
-        st.info("Enter one or more Driver IDs to preview, or enable Allow unfiltered clean.")
-    ready = api_credentials_ready(base_url, api_key, account_name) and (has_driver_filter or allow_unfiltered)
+    if not has_driver_filter:
+        st.info("Driver IDs are blank, so preview fetches attribute IDs across all matching drivers for the selected date range.")
+    ready = api_credentials_ready(base_url, api_key, account_name)
 
-    if st.button("Preview Clean Payload", disabled=not ready, key="preview_clean"):
+    if st.button("Fetch Attribute IDs / Preview Clean Payload", disabled=not ready, key="preview_clean"):
         try:
             st.session_state["clean_fetched_entries"] = fetch_custom_attributes(
                 base_url=base_url,
@@ -742,6 +741,9 @@ def render_clean_preview(
     ready: bool,
 ) -> None:
     attribute_options = sorted({str(entry.get("attributeId")) for entry in fetched if entry.get("attributeId")})
+    if not attribute_options:
+        st.info("No attribute IDs were found for the current driver/date filters.")
+        return
     selected_attribute_ids = st.multiselect(
         "Attribute IDs to clean",
         options=attribute_options,
