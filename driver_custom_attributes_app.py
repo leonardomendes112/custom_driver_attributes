@@ -672,11 +672,10 @@ def render_clean_mode(
     st.subheader("Clean All Attributes")
     st.caption(
         "This fetches matching entries and sends updates with value omitted. Optibus rejects this for mandatory "
-        "attributes, so clean mode should target only optional attributes or skip known mandatory attribute IDs."
+        "attributes, so clean mode should target only optional attributes."
     )
     st.warning(
-        "If Optibus returns 'mandatory attribute cannot have empty value', add that attribute ID to the skip list "
-        "or narrow the Attribute IDs filter to optional attributes only."
+        "After preview, select only the optional attributes to clean. Unselected attributes are skipped automatically."
     )
     try:
         filters = render_filter_controls("clean")
@@ -684,14 +683,6 @@ def render_clean_mode(
         st.error(str(exc))
         return
 
-    skip_attribute_ids = parse_csv_filter(
-        st.text_area(
-            "Mandatory attribute IDs to skip",
-            placeholder="licenseNumber, homeDepot",
-            key="clean_skip_attribute_ids",
-            help="Comma, semicolon, or newline separated. These fetched attributes are shown in preview but excluded from the clean payload.",
-        )
-    )
     require_attribute_filter = st.checkbox(
         "Require Attribute IDs filter before cleaning",
         value=True,
@@ -740,7 +731,6 @@ def render_clean_mode(
             timeout=timeout,
             batch_size=batch_size,
             fetched=fetched,
-            skip_attribute_ids=skip_attribute_ids,
             dry_run=dry_run,
             confirm_clean=confirm_clean,
             ready=ready,
@@ -755,7 +745,6 @@ def render_clean_preview(
     timeout: int,
     batch_size: int,
     fetched: Sequence[Dict[str, Any]],
-    skip_attribute_ids: Sequence[str],
     dry_run: bool,
     confirm_clean: bool,
     ready: bool,
@@ -768,11 +757,18 @@ def render_clean_preview(
         key="clean_selected_attribute_ids",
         help="Select only optional attributes. Mandatory attributes such as idfiscalemployee should remain unselected.",
     )
+    auto_skip_attribute_ids = [attribute_id for attribute_id in attribute_options if attribute_id not in selected_attribute_ids]
+    st.text_area(
+        "Mandatory / skipped attribute IDs",
+        value="\n".join(auto_skip_attribute_ids),
+        disabled=True,
+        help="Auto-filled from fetched attributes that are not selected above. These are excluded from the clean payload.",
+    )
     if selected_attribute_ids:
         entries, skipped_entries = clean_entries_from_fetched(
             fetched,
             include_attribute_ids=selected_attribute_ids,
-            skip_attribute_ids=skip_attribute_ids,
+            skip_attribute_ids=auto_skip_attribute_ids,
         )
     else:
         entries, skipped_entries = [], list(fetched)
@@ -787,7 +783,7 @@ def render_clean_preview(
     st.write("Fetched entries")
     st.dataframe(fetched_entries_to_template(fetched), use_container_width=True, hide_index=True)
     if skipped_entries:
-        st.info("Skipped entries were excluded because their attribute IDs are in the mandatory skip list.")
+        st.info("Skipped entries were excluded because their attribute IDs were not selected for cleaning.")
         st.dataframe(fetched_entries_to_template(skipped_entries), use_container_width=True, hide_index=True)
     st.write("Clean payload index map")
     st.dataframe(clean_payload_dataframe(entries), use_container_width=True, hide_index=True)
