@@ -26,6 +26,7 @@ MAX_API_BATCH_SIZE = 1000
 ENDPOINT_PATH = "/v2/drivers/custom-attributes"
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DURATION_RE = re.compile(r"^\d{1,3}:[0-5]\d$")
+ENTRY_ERROR_RE = re.compile(r"entries\[(\d+)\]")
 
 
 class TemplateError(ValueError):
@@ -333,17 +334,34 @@ def put_custom_attribute_batches(
     for index, batch in enumerate(chunk_entries(entries, batch_size), start=1):
         response = requests.put(url, headers=headers, json=entries_to_payload(batch), timeout=timeout)
         if not response.ok:
-            raise RuntimeError(f"Batch {index} failed: {format_api_error(response)}")
+            raise RuntimeError(f"Batch {index} failed: {format_api_error(response, batch)}")
         responses.append(response.json() if response.content else {})
     return responses
 
 
-def format_api_error(response: requests.Response) -> str:
+def format_api_error(response: requests.Response, batch: Sequence[Dict[str, Any]] | None = None) -> str:
     try:
         payload = response.json()
     except ValueError:
         payload = response.text
-    return f"HTTP {response.status_code}: {payload}"
+    entry_context = format_entry_error_context(payload, batch or [])
+    return f"HTTP {response.status_code}: {payload}{entry_context}"
+
+
+def format_entry_error_context(payload: Any, batch: Sequence[Dict[str, Any]]) -> str:
+    if not batch:
+        return ""
+    matches = ENTRY_ERROR_RE.findall(str(payload))
+    details = []
+    for match in matches:
+        index = int(match)
+        if 0 <= index < len(batch):
+            entry = batch[index]
+            details.append(
+                f"entries[{index}] is driverId={entry.get('driverId')}, "
+                f"attributeId={entry.get('attributeId')}, startDate={entry.get('startDate')}"
+            )
+    return " | " + "; ".join(details) if details else ""
 
 
 def fetched_entries_to_template(entries: Sequence[Dict[str, Any]]) -> pd.DataFrame:
@@ -382,9 +400,18 @@ def infer_value_type(value: Any, default: str) -> str:
     return default
 
 
-def clean_entries_from_fetched(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def clean_entries_from_fetched(
+    entries: Sequence[Dict[str, Any]],
+    *,
+    skip_attribute_ids: Sequence[str] = (),
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     clean_entries: List[Dict[str, Any]] = []
+    skipped_entries: List[Dict[str, Any]] = []
+    skip_set = set(skip_attribute_ids)
     for entry in entries:
+        if entry.get("attributeId") in skip_set:
+            skipped_entries.append(entry)
+            continue
         clean_entry = {
             "entryId": entry.get("entryId"),
             "driverId": entry.get("driverId"),
@@ -394,7 +421,35 @@ def clean_entries_from_fetched(entries: Sequence[Dict[str, Any]]) -> List[Dict[s
         if entry.get("endDate"):
             clean_entry["endDate"] = entry.get("endDate")
         clean_entries.append({key: value for key, value in clean_entry.items() if value})
-    return clean_entries
+    return clean_entries, skipped_entries
+
+
+def summarize_entries_by_attribute(entries: Sequence[Dict[str, Any]]) -> pd.DataFrame:
+    rows = [{"attribute_id": entry.get("attributeId", ""), "entries": 1} for entry in entries]
+    if not rows:
+        return pd.DataFrame(columns=["attribute_id", "entries"])
+    return (
+        pd.DataFrame(rows)
+        .groupby("attribute_id", as_index=False)["entries"]
+        .sum()
+        .sort_values(["entries", "attribute_id"], ascending=[False, True])
+    )
+
+
+def clean_payload_dataframe(entries: Sequence[Dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for index, entry in enumerate(entries):
+        rows.append(
+            {
+                "payload_index": index,
+                "entry_id": entry.get("entryId", ""),
+                "driver_id": entry.get("driverId", ""),
+                "attribute_id": entry.get("attributeId", ""),
+                "start_date": entry.get("startDate", ""),
+                "end_date": entry.get("endDate", ""),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def api_credentials_ready(base_url: str, api_key: str, account_name: str) -> bool:
@@ -591,8 +646,12 @@ def render_clean_mode(
 ) -> None:
     st.subheader("Clean All Attributes")
     st.caption(
-        "This fetches matching entries and sends updates with value omitted. It is intended for non-mandatory attributes; "
-        "mandatory attributes may be rejected by the API."
+        "This fetches matching entries and sends updates with value omitted. Optibus rejects this for mandatory "
+        "attributes, so clean mode should target only optional attributes or skip known mandatory attribute IDs."
+    )
+    st.warning(
+        "If Optibus returns 'mandatory attribute cannot have empty value', add that attribute ID to the skip list "
+        "or narrow the Attribute IDs filter to optional attributes only."
     )
     try:
         filters = render_filter_controls("clean")
@@ -600,6 +659,20 @@ def render_clean_mode(
         st.error(str(exc))
         return
 
+    skip_attribute_ids = parse_csv_filter(
+        st.text_area(
+            "Mandatory attribute IDs to skip",
+            placeholder="licenseNumber, homeDepot",
+            key="clean_skip_attribute_ids",
+            help="Comma, semicolon, or newline separated. These fetched attributes are shown in preview but excluded from the clean payload.",
+        )
+    )
+    require_attribute_filter = st.checkbox(
+        "Require Attribute IDs filter before cleaning",
+        value=True,
+        key="clean_require_attribute_filter",
+        help="Recommended. Cleaning all attributes usually fails when mandatory attributes are present.",
+    )
     dry_run = st.checkbox("Dry run only", value=True, key="clean_dry_run")
     allow_unfiltered = st.checkbox("Allow unfiltered clean", key="clean_allow_unfiltered")
     confirmation = st.text_input(
@@ -607,7 +680,14 @@ def render_clean_mode(
         key="clean_confirmation",
     )
     has_filter = bool(filters["driver_ids"] or filters["attribute_ids"] or filters["from_date"] or filters["to_date"])
-    ready = api_credentials_ready(base_url, api_key, account_name) and (has_filter or allow_unfiltered)
+    has_attribute_filter = bool(filters["attribute_ids"])
+    if require_attribute_filter and not has_attribute_filter:
+        st.info("Enter one or more optional Attribute IDs to clean, or disable the attribute-filter requirement.")
+    ready = (
+        api_credentials_ready(base_url, api_key, account_name)
+        and (has_filter or allow_unfiltered)
+        and (has_attribute_filter or not require_attribute_filter)
+    )
 
     if st.button("Preview Clean Payload", disabled=not ready, key="preview_clean"):
         render_clean_preview(
@@ -617,6 +697,7 @@ def render_clean_mode(
             timeout=timeout,
             batch_size=batch_size,
             filters=filters,
+            skip_attribute_ids=skip_attribute_ids,
             execute=False,
         )
 
@@ -629,6 +710,7 @@ def render_clean_mode(
             timeout=timeout,
             batch_size=batch_size,
             filters=filters,
+            skip_attribute_ids=skip_attribute_ids,
             execute=True,
         )
 
@@ -641,6 +723,7 @@ def render_clean_preview(
     timeout: int,
     batch_size: int,
     filters: Dict[str, Any],
+    skip_attribute_ids: Sequence[str],
     execute: bool,
 ) -> None:
     try:
@@ -654,17 +737,32 @@ def render_clean_preview(
             to_date=filters["to_date"],
             timeout=timeout,
         )
-        entries = clean_entries_from_fetched(fetched)
+        entries, skipped_entries = clean_entries_from_fetched(fetched, skip_attribute_ids=skip_attribute_ids)
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
         return
 
-    st.write(f"Matched {len(fetched):,} existing entries; clean payload contains {len(entries):,} updates.")
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Matched entries", f"{len(fetched):,}")
+    metric_cols[1].metric("Clean payload updates", f"{len(entries):,}")
+    metric_cols[2].metric("Skipped entries", f"{len(skipped_entries):,}")
+
+    st.write("Matched attributes")
+    st.dataframe(summarize_entries_by_attribute(fetched), use_container_width=True, hide_index=True)
+    st.write("Fetched entries")
     st.dataframe(fetched_entries_to_template(fetched), use_container_width=True, hide_index=True)
+    if skipped_entries:
+        st.info("Skipped entries were excluded because their attribute IDs are in the mandatory skip list.")
+        st.dataframe(fetched_entries_to_template(skipped_entries), use_container_width=True, hide_index=True)
+    st.write("Clean payload index map")
+    st.dataframe(clean_payload_dataframe(entries), use_container_width=True, hide_index=True)
     with st.expander("Clean payload preview", expanded=True):
         st.json(entries_to_payload(entries))
 
     if execute:
+        if not entries:
+            st.error("No entries remain in the clean payload after applying filters and skip list.")
+            return
         try:
             responses = put_custom_attribute_batches(
                 base_url=base_url,
