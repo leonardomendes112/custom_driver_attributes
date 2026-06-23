@@ -501,7 +501,10 @@ def render_template_download() -> None:
 
 def render_fetch_export(base_url: str, api_key: str, account_name: str, timeout: int) -> None:
     with st.expander("Fetch and export current attributes", expanded=False):
-        st.caption("Use this to export current entry_id values before editing existing periods.")
+        st.caption(
+            "Use this first when changing existing driver attributes. Export the current entries, keep the periods "
+            "that should remain unchanged, then edit only the values/dates that should change."
+        )
         try:
             filters = render_filter_controls("fetch")
         except Exception as exc:  # noqa: BLE001
@@ -586,15 +589,25 @@ def render_import_mode(
     timeout: int,
     batch_size: int,
 ) -> None:
-    is_add_mode = mode.startswith("Add")
+    is_add_mode = mode.startswith("Append")
     st.subheader(mode)
     if is_add_mode:
-        st.caption("Non-destructive mode strips entry_id values and creates new entries only.")
+        st.caption(
+            "Creates new entries by stripping entry_id values. Existing entries are not sent in the payload, but the "
+            "resulting timeline for each driver + attribute must still be valid. Fetch existing entries first if you "
+            "need to preserve or adjust surrounding periods."
+        )
     else:
         st.caption(
-            "Edit mode sends entry_id values when present. The API updates matching entries, creates missing entry IDs, "
-            "and can unset non-mandatory values with value_type=unset. The API docs do not expose a DELETE endpoint."
+            "Sends entry_id values when present. The API updates matching entries and creates missing entry IDs. "
+            "For safe edits, start from a fetched export so unchanged entries for the affected driver + attribute "
+            "remain in the template."
         )
+    st.info(
+        "Important: /v2/drivers/custom-attributes is entry-based, not a full driver replacement. However, Optibus "
+        "validates the full timeline for each affected driver + attribute: no overlaps, no gaps, and exactly one "
+        "open-ended entry. Preserve unchanged timeline entries when editing existing attributes."
+    )
 
     uploaded = st.file_uploader(
         "Upload completed template",
@@ -794,6 +807,10 @@ def render_driver_custom_attributes_tab() -> None:
     st.caption(
         "Upload templates for /v2/drivers/custom-attributes, preview the JSON payload, and run controlled PUT imports."
     )
+    st.warning(
+        "Before editing existing attributes, fetch the current entries and build your upload from that export. "
+        "This avoids accidentally changing the affected driver + attribute timeline."
+    )
 
     render_template_download()
     st.divider()
@@ -804,8 +821,8 @@ def render_driver_custom_attributes_tab() -> None:
     mode = st.radio(
         "Mode",
         [
-            "Add (non-destructive)",
-            "Edit / overwrite",
+            "Append new entries",
+            "Edit existing timeline",
             "Clean all attributes",
         ],
         horizontal=True,
