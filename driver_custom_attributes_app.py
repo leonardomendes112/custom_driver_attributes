@@ -539,6 +539,7 @@ def render_fetch_export(base_url: str, api_key: str, account_name: str, timeout:
 
 
 def render_filter_controls(key_prefix: str) -> Dict[str, Any]:
+    today = date.today()
     col1, col2 = st.columns(2)
     with col1:
         driver_ids = st.text_area(
@@ -547,24 +548,32 @@ def render_filter_controls(key_prefix: str) -> Dict[str, Any]:
             key=f"{key_prefix}_driver_ids",
             help="Comma-separated. Leave blank only when you intentionally want a broad query.",
         )
-        from_date = st.text_input("From date", placeholder="YYYY-MM-DD", key=f"{key_prefix}_from_date")
+        from_date = st.date_input(
+            "From date",
+            value=today,
+            key=f"{key_prefix}_from_date",
+            help="Only entries that end on or after this date are returned. Defaults to today.",
+        )
     with col2:
         attribute_ids = st.text_area(
             "Attribute IDs filter",
             placeholder="color, skills",
             key=f"{key_prefix}_attribute_ids",
         )
-        to_date = st.text_input("To date", placeholder="YYYY-MM-DD", key=f"{key_prefix}_to_date")
+        to_date = st.date_input(
+            "To date",
+            value=today,
+            key=f"{key_prefix}_to_date",
+            help="Only entries that start on or before this date are returned. Defaults to today.",
+        )
 
-    clean_from = require_date(from_date, "from_date", 1, allow_blank=True) if str(from_date).strip() else None
-    clean_to = require_date(to_date, "to_date", 1, allow_blank=True) if str(to_date).strip() else None
-    if clean_from and clean_to and date.fromisoformat(clean_to) < date.fromisoformat(clean_from):
+    if to_date < from_date:
         raise TemplateError("to_date cannot be before from_date.")
     return {
         "driver_ids": parse_csv_filter(driver_ids),
         "attribute_ids": parse_csv_filter(attribute_ids),
-        "from_date": clean_from,
-        "to_date": clean_to,
+        "from_date": from_date.isoformat(),
+        "to_date": to_date.isoformat(),
     }
 
 
@@ -675,9 +684,10 @@ def render_clean_mode(
     )
     dry_run = st.checkbox("Dry run only", value=True, key="clean_dry_run")
     allow_unfiltered = st.checkbox("Allow unfiltered clean", key="clean_allow_unfiltered")
-    confirmation = st.text_input(
-        "Type CLEAN DRIVER ATTRIBUTES to enable execution",
-        key="clean_confirmation",
+    confirm_clean = st.checkbox(
+        "I understand this will clean matching optional attributes",
+        key="clean_confirmation_checkbox",
+        help="Required before Run Clean is enabled. Keep Dry run only checked until the preview looks correct.",
     )
     has_filter = bool(filters["driver_ids"] or filters["attribute_ids"] or filters["from_date"] or filters["to_date"])
     has_attribute_filter = bool(filters["attribute_ids"])
@@ -701,7 +711,7 @@ def render_clean_mode(
             execute=False,
         )
 
-    execute_ready = ready and not dry_run and confirmation == "CLEAN DRIVER ATTRIBUTES"
+    execute_ready = ready and not dry_run and confirm_clean
     if st.button("Run Clean", type="primary", disabled=not execute_ready, key="run_clean"):
         render_clean_preview(
             base_url=base_url,
