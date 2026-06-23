@@ -403,13 +403,16 @@ def infer_value_type(value: Any, default: str) -> str:
 def clean_entries_from_fetched(
     entries: Sequence[Dict[str, Any]],
     *,
+    include_attribute_ids: Sequence[str] = (),
     skip_attribute_ids: Sequence[str] = (),
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     clean_entries: List[Dict[str, Any]] = []
     skipped_entries: List[Dict[str, Any]] = []
+    include_set = set(include_attribute_ids)
     skip_set = set(skip_attribute_ids)
     for entry in entries:
-        if entry.get("attributeId") in skip_set:
+        attribute_id = entry.get("attributeId")
+        if attribute_id in skip_set or (include_set and attribute_id not in include_set):
             skipped_entries.append(entry)
             continue
         clean_entry = {
@@ -713,28 +716,34 @@ def render_clean_mode(
     )
 
     if st.button("Preview Clean Payload", disabled=not ready, key="preview_clean"):
-        render_clean_preview(
-            base_url=base_url,
-            api_key=api_key,
-            account_name=account_name,
-            timeout=timeout,
-            batch_size=batch_size,
-            filters=filters,
-            skip_attribute_ids=skip_attribute_ids,
-            execute=False,
-        )
+        try:
+            st.session_state["clean_fetched_entries"] = fetch_custom_attributes(
+                base_url=base_url,
+                api_key=api_key,
+                account_name=account_name,
+                driver_ids=filters["driver_ids"],
+                attribute_ids=filters["attribute_ids"],
+                from_date=filters["from_date"],
+                to_date=filters["to_date"],
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(str(exc))
+            return
 
-    execute_ready = ready and not dry_run and confirm_clean
-    if st.button("Run Clean", type="primary", disabled=not execute_ready, key="run_clean"):
+    fetched = st.session_state.get("clean_fetched_entries", [])
+    if fetched:
         render_clean_preview(
             base_url=base_url,
             api_key=api_key,
             account_name=account_name,
             timeout=timeout,
             batch_size=batch_size,
-            filters=filters,
+            fetched=fetched,
             skip_attribute_ids=skip_attribute_ids,
-            execute=True,
+            dry_run=dry_run,
+            confirm_clean=confirm_clean,
+            ready=ready,
         )
 
 
@@ -745,25 +754,28 @@ def render_clean_preview(
     account_name: str,
     timeout: int,
     batch_size: int,
-    filters: Dict[str, Any],
+    fetched: Sequence[Dict[str, Any]],
     skip_attribute_ids: Sequence[str],
-    execute: bool,
+    dry_run: bool,
+    confirm_clean: bool,
+    ready: bool,
 ) -> None:
-    try:
-        fetched = fetch_custom_attributes(
-            base_url=base_url,
-            api_key=api_key,
-            account_name=account_name,
-            driver_ids=filters["driver_ids"],
-            attribute_ids=filters["attribute_ids"],
-            from_date=filters["from_date"],
-            to_date=filters["to_date"],
-            timeout=timeout,
+    attribute_options = sorted({str(entry.get("attributeId")) for entry in fetched if entry.get("attributeId")})
+    selected_attribute_ids = st.multiselect(
+        "Optional attribute IDs to clean",
+        options=attribute_options,
+        default=[],
+        key="clean_selected_attribute_ids",
+        help="Select only optional attributes. Mandatory attributes such as idfiscalemployee should remain unselected.",
+    )
+    if selected_attribute_ids:
+        entries, skipped_entries = clean_entries_from_fetched(
+            fetched,
+            include_attribute_ids=selected_attribute_ids,
+            skip_attribute_ids=skip_attribute_ids,
         )
-        entries, skipped_entries = clean_entries_from_fetched(fetched, skip_attribute_ids=skip_attribute_ids)
-    except Exception as exc:  # noqa: BLE001
-        st.error(str(exc))
-        return
+    else:
+        entries, skipped_entries = [], list(fetched)
 
     metric_cols = st.columns(3)
     metric_cols[0].metric("Matched entries", f"{len(fetched):,}")
@@ -782,9 +794,12 @@ def render_clean_preview(
     with st.expander("Clean payload preview", expanded=True):
         st.json(entries_to_payload(entries))
 
-    if execute:
+    if not selected_attribute_ids:
+        st.info("Select one or more optional attribute IDs from the preview before running clean.")
+    execute_ready = ready and not dry_run and confirm_clean and bool(entries)
+    if st.button("Run Clean From Preview", type="primary", disabled=not execute_ready, key="run_clean"):
         if not entries:
-            st.error("No entries remain in the clean payload after applying filters and skip list.")
+            st.error("No entries remain in the clean payload after applying filters, selection, and skip list.")
             return
         try:
             responses = put_custom_attribute_batches(
