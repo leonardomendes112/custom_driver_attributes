@@ -544,7 +544,7 @@ def render_fetch_export(base_url: str, api_key: str, account_name: str, timeout:
             )
 
 
-def render_filter_controls(key_prefix: str) -> Dict[str, Any]:
+def render_filter_controls(key_prefix: str, *, show_attribute_filter: bool = True) -> Dict[str, Any]:
     today = date.today()
     col1, col2 = st.columns(2)
     with col1:
@@ -561,11 +561,14 @@ def render_filter_controls(key_prefix: str) -> Dict[str, Any]:
             help="Only entries that end on or after this date are returned. Defaults to today.",
         )
     with col2:
-        attribute_ids = st.text_area(
-            "Attribute IDs filter",
-            placeholder="color, skills",
-            key=f"{key_prefix}_attribute_ids",
-        )
+        if show_attribute_filter:
+            attribute_ids = st.text_area(
+                "Attribute IDs filter",
+                placeholder="color, skills",
+                key=f"{key_prefix}_attribute_ids",
+            )
+        else:
+            attribute_ids = ""
         to_date = st.date_input(
             "To date",
             value=today,
@@ -678,17 +681,11 @@ def render_clean_mode(
         "After preview, select only the optional attributes to clean. Unselected attributes are skipped automatically."
     )
     try:
-        filters = render_filter_controls("clean")
+        filters = render_filter_controls("clean", show_attribute_filter=False)
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
         return
 
-    require_attribute_filter = st.checkbox(
-        "Require Attribute IDs filter before cleaning",
-        value=True,
-        key="clean_require_attribute_filter",
-        help="Recommended. Cleaning all attributes usually fails when mandatory attributes are present.",
-    )
     dry_run = st.checkbox("Dry run only", value=True, key="clean_dry_run")
     allow_unfiltered = st.checkbox("Allow unfiltered clean", key="clean_allow_unfiltered")
     confirm_clean = st.checkbox(
@@ -696,15 +693,10 @@ def render_clean_mode(
         key="clean_confirmation_checkbox",
         help="Required before Run Clean is enabled. Keep Dry run only checked until the preview looks correct.",
     )
-    has_filter = bool(filters["driver_ids"] or filters["attribute_ids"] or filters["from_date"] or filters["to_date"])
-    has_attribute_filter = bool(filters["attribute_ids"])
-    if require_attribute_filter and not has_attribute_filter:
-        st.info("Enter one or more optional Attribute IDs to clean, or disable the attribute-filter requirement.")
-    ready = (
-        api_credentials_ready(base_url, api_key, account_name)
-        and (has_filter or allow_unfiltered)
-        and (has_attribute_filter or not require_attribute_filter)
-    )
+    has_driver_filter = bool(filters["driver_ids"])
+    if not has_driver_filter and not allow_unfiltered:
+        st.info("Enter one or more Driver IDs to preview, or enable Allow unfiltered clean.")
+    ready = api_credentials_ready(base_url, api_key, account_name) and (has_driver_filter or allow_unfiltered)
 
     if st.button("Preview Clean Payload", disabled=not ready, key="preview_clean"):
         try:
@@ -751,11 +743,11 @@ def render_clean_preview(
 ) -> None:
     attribute_options = sorted({str(entry.get("attributeId")) for entry in fetched if entry.get("attributeId")})
     selected_attribute_ids = st.multiselect(
-        "Optional attribute IDs to clean",
+        "Attribute IDs to clean",
         options=attribute_options,
         default=[],
         key="clean_selected_attribute_ids",
-        help="Select only optional attributes. Mandatory attributes such as idfiscalemployee should remain unselected.",
+        help="Select only optional attributes. Unselected attributes are skipped automatically.",
     )
     auto_skip_attribute_ids = [attribute_id for attribute_id in attribute_options if attribute_id not in selected_attribute_ids]
     st.text_area(
