@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -89,10 +89,15 @@ def dataframe_excel_bytes(df: pd.DataFrame, sheet_name: str = "Template") -> byt
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+        workbook = writer.book
         worksheet = writer.sheets[sheet_name[:31]]
+        date_format = workbook.add_format({"num_format": "yyyy-mm-dd"})
         for index, column in enumerate(df.columns):
             width = min(max(len(str(column)), 14), 36)
-            worksheet.set_column(index, index, width)
+            if column in {"start_date", "end_date"}:
+                worksheet.set_column(index, index, width, date_format)
+            else:
+                worksheet.set_column(index, index, width)
     return output.getvalue()
 
 
@@ -111,25 +116,47 @@ def read_template(uploaded_file: Any) -> pd.DataFrame:
     if suffix == "csv":
         df = pd.read_csv(BytesIO(raw), dtype=str, keep_default_na=False)
     elif suffix in {"xlsx", "xls"}:
-        df = pd.read_excel(BytesIO(raw), dtype=str).fillna("")
+        df = pd.read_excel(BytesIO(raw), keep_default_na=False).fillna("")
     else:
         raise TemplateError("Upload a CSV or Excel file.")
     return normalize_dataframe_columns(df)
 
 
-def require_date(value: str, field_name: str, row_number: int, *, allow_blank: bool = False) -> str | None:
+def require_date(value: Any, field_name: str, row_number: int, *, allow_blank: bool = False) -> str | None:
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+
     cleaned = str(value or "").strip()
     if not cleaned:
         if allow_blank:
             return None
         raise TemplateError(f"Row {row_number}: {field_name} is required.")
-    if not DATE_RE.match(cleaned):
-        raise TemplateError(f"Row {row_number}: {field_name} must be formatted as YYYY-MM-DD.")
-    try:
-        date.fromisoformat(cleaned)
-    except ValueError as exc:
-        raise TemplateError(f"Row {row_number}: {field_name} is not a valid calendar date.") from exc
-    return cleaned
+
+    normalized = normalize_date_string(cleaned)
+    if normalized:
+        return normalized
+    raise TemplateError(
+        f"Row {row_number}: {field_name} must be a valid date. Accepted examples: 2026-06-24, 06/24/2026, 24/06/2026."
+    )
+
+
+def normalize_date_string(value: str) -> str | None:
+    if DATE_RE.match(value):
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError:
+            return None
+
+    for date_format in ("%m/%d/%Y", "%d/%m/%Y", "%m-%d-%Y", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value, date_format).date().isoformat()
+        except ValueError:
+            continue
+    return None
 
 
 def parse_bool(value: str, row_number: int) -> bool:
@@ -219,8 +246,8 @@ def records_to_entries(df: pd.DataFrame, *, strip_entry_ids: bool) -> List[Dict[
         if not attribute_id:
             raise TemplateError(f"Row {row_number}: attribute_id is required.")
 
-        start_date = require_date(str(row["start_date"]), "start_date", row_number)
-        end_date = require_date(str(row["end_date"]), "end_date", row_number, allow_blank=True)
+        start_date = require_date(row["start_date"], "start_date", row_number)
+        end_date = require_date(row["end_date"], "end_date", row_number, allow_blank=True)
         if end_date and start_date and date.fromisoformat(end_date) < date.fromisoformat(start_date):
             raise TemplateError(f"Row {row_number}: end_date cannot be before start_date.")
 
@@ -535,13 +562,23 @@ def render_fetch_export(base_url: str, api_key: str, account_name: str, timeout:
             st.success(f"Fetched {len(entries):,} entries.")
             export_df = fetched_entries_to_template(entries)
             st.dataframe(export_df, use_container_width=True, hide_index=True)
-            st.download_button(
-                "Download fetched attributes as CSV",
-                dataframe_csv_bytes(export_df),
-                file_name="driver_custom_attributes_current.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "Download fetched attributes as CSV",
+                    dataframe_csv_bytes(export_df),
+                    file_name="driver_custom_attributes_current.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            with col2:
+                st.download_button(
+                    "Download fetched attributes as Excel",
+                    dataframe_excel_bytes(export_df, sheet_name="Current Attributes"),
+                    file_name="driver_custom_attributes_current.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
 
 def render_filter_controls(key_prefix: str, *, show_attribute_filter: bool = True) -> Dict[str, Any]:
