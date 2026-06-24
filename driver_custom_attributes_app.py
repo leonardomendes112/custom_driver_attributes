@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 from datetime import date, datetime
@@ -82,7 +83,16 @@ def template_dataframe() -> pd.DataFrame:
 
 
 def dataframe_csv_bytes(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
+    out = df.copy()
+    for column in ("start_date", "end_date"):
+        if column in out.columns:
+            out[column] = out[column].apply(format_csv_date_for_excel)
+    return out.to_csv(index=False, quoting=csv.QUOTE_ALL).encode("utf-8")
+
+
+def format_csv_date_for_excel(value: Any) -> str:
+    normalized = require_date(value, "date", 1, allow_blank=True)
+    return f'="{normalized}"' if normalized else ""
 
 
 def dataframe_excel_bytes(df: pd.DataFrame, sheet_name: str = "Template") -> bytes:
@@ -145,6 +155,7 @@ def require_date(value: Any, field_name: str, row_number: int, *, allow_blank: b
 
 
 def normalize_date_string(value: str) -> str | None:
+    value = unwrap_excel_text_date(value)
     if DATE_RE.match(value):
         try:
             return date.fromisoformat(value).isoformat()
@@ -157,6 +168,15 @@ def normalize_date_string(value: str) -> str | None:
         except ValueError:
             continue
     return None
+
+
+def unwrap_excel_text_date(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith('="') and stripped.endswith('"'):
+        return stripped[2:-1].strip()
+    if stripped.startswith("'"):
+        return stripped[1:].strip()
+    return stripped
 
 
 def parse_bool(value: str, row_number: int) -> bool:
