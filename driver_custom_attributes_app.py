@@ -672,13 +672,14 @@ def render_clean_mode(
     timeout: int,
     batch_size: int,
 ) -> None:
-    st.subheader("Clean All Attributes")
+    st.subheader("Unset Selected Attribute Values")
     st.caption(
-        "This fetches matching entries and sends updates with value omitted. Optibus rejects this for mandatory "
-        "attributes, so clean mode should target only optional attributes."
+        "This fetches matching entries and sends updates with value omitted. In the public Optibus API this unsets "
+        "the value for non-mandatory attributes; it does not delete the timeline entry or its start/end dates."
     )
     st.warning(
-        "Fetch the attributes first, then select only the optional attribute IDs to clean. Unselected attributes are skipped automatically."
+        "Full deletion of a custom-attribute timeline entry is not documented for /v2/drivers/custom-attributes. "
+        "Use this only when you want the attribute value to become 'not defined'."
     )
     try:
         filters = render_filter_controls("clean", show_attribute_filter=False)
@@ -688,16 +689,16 @@ def render_clean_mode(
 
     dry_run = st.checkbox("Dry run only", value=True, key="clean_dry_run")
     confirm_clean = st.checkbox(
-        "I understand this will clean matching optional attributes",
+        "I understand this will unset matching optional attribute values, not delete entries",
         key="clean_confirmation_checkbox",
-        help="Required before Run Clean is enabled. Keep Dry run only checked until the preview looks correct.",
+        help="Required before Run Unset is enabled. Keep Dry run only checked until the preview looks correct.",
     )
     has_driver_filter = bool(filters["driver_ids"])
     if not has_driver_filter:
         st.info("Driver IDs are blank, so preview fetches attribute IDs across all matching drivers for the selected date range.")
     ready = api_credentials_ready(base_url, api_key, account_name)
 
-    if st.button("Fetch Attribute IDs / Preview Clean Payload", disabled=not ready, key="preview_clean"):
+    if st.button("Fetch Attribute IDs / Preview Unset Payload", disabled=not ready, key="preview_clean"):
         try:
             st.session_state["clean_fetched_entries"] = fetch_custom_attributes(
                 base_url=base_url,
@@ -745,7 +746,7 @@ def render_clean_preview(
         st.info("No attribute IDs were found for the current driver/date filters.")
         return
     selected_attribute_ids = st.multiselect(
-        "Attribute IDs to clean",
+        "Attribute IDs to unset",
         options=attribute_options,
         default=[],
         key="clean_selected_attribute_ids",
@@ -756,7 +757,7 @@ def render_clean_preview(
         "Mandatory / skipped attribute IDs",
         value="\n".join(auto_skip_attribute_ids),
         disabled=True,
-        help="Auto-filled from fetched attributes that are not selected above. These are excluded from the clean payload.",
+        help="Auto-filled from fetched attributes that are not selected above. These are excluded from the unset payload.",
     )
     if selected_attribute_ids:
         entries, skipped_entries = clean_entries_from_fetched(
@@ -769,7 +770,7 @@ def render_clean_preview(
 
     metric_cols = st.columns(3)
     metric_cols[0].metric("Matched entries", f"{len(fetched):,}")
-    metric_cols[1].metric("Clean payload updates", f"{len(entries):,}")
+    metric_cols[1].metric("Unset payload updates", f"{len(entries):,}")
     metric_cols[2].metric("Skipped entries", f"{len(skipped_entries):,}")
 
     st.write("Matched attributes")
@@ -777,19 +778,19 @@ def render_clean_preview(
     st.write("Fetched entries")
     st.dataframe(fetched_entries_to_template(fetched), use_container_width=True, hide_index=True)
     if skipped_entries:
-        st.info("Skipped entries were excluded because their attribute IDs were not selected for cleaning.")
+        st.info("Skipped entries were excluded because their attribute IDs were not selected for unsetting.")
         st.dataframe(fetched_entries_to_template(skipped_entries), use_container_width=True, hide_index=True)
-    st.write("Clean payload index map")
+    st.write("Unset payload index map")
     st.dataframe(clean_payload_dataframe(entries), use_container_width=True, hide_index=True)
-    with st.expander("Clean payload preview", expanded=True):
+    with st.expander("Unset payload preview", expanded=True):
         st.json(entries_to_payload(entries))
 
     if not selected_attribute_ids:
-        st.info("Select one or more optional attribute IDs from the preview before running clean.")
+        st.info("Select one or more optional attribute IDs from the preview before running unset.")
     execute_ready = ready and not dry_run and confirm_clean and bool(entries)
-    if st.button("Run Clean From Preview", type="primary", disabled=not execute_ready, key="run_clean"):
+    if st.button("Run Unset From Preview", type="primary", disabled=not execute_ready, key="run_clean"):
         if not entries:
-            st.error("No entries remain in the clean payload after applying filters, selection, and skip list.")
+            st.error("No entries remain in the unset payload after applying filters, selection, and skip list.")
             return
         try:
             responses = put_custom_attribute_batches(
@@ -803,7 +804,7 @@ def render_clean_preview(
         except Exception as exc:  # noqa: BLE001
             st.error(str(exc))
             return
-        st.success(f"Cleaned {len(entries):,} entries across {len(responses):,} API batch(es).")
+        st.success(f"Unset {len(entries):,} entries across {len(responses):,} API batch(es).")
         st.json(responses)
 
 
@@ -828,12 +829,12 @@ def render_driver_custom_attributes_tab() -> None:
         [
             "Append new entries",
             "Edit existing timeline",
-            "Clean all attributes",
+            "Unset attribute values",
         ],
         horizontal=True,
     )
 
-    if mode == "Clean all attributes":
+    if mode == "Unset attribute values":
         render_clean_mode(
             base_url=base_url,
             api_key=api_key,
